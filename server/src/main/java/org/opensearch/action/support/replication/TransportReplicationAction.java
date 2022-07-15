@@ -203,8 +203,8 @@ public abstract class TransportReplicationAction<
         this.shardStateAction = shardStateAction;
         this.executor = executor;
 
-        this.transportPrimaryAction = actionName + "[p]";
-        this.transportReplicaAction = actionName + "[r]";
+        this.transportPrimaryAction = getPrimaryActionName(actionName);
+        this.transportReplicaAction = getReplicaActionName(actionName);
 
         this.initialRetryBackoffBound = REPLICATION_INITIAL_RETRY_BACKOFF_BOUND.get(settings);
         this.retryTimeout = REPLICATION_RETRY_TIMEOUT.get(settings);
@@ -1535,6 +1535,14 @@ public abstract class TransportReplicationAction<
                 + maxSeqNoOfUpdatesOrDeletes
                 + '}';
         }
+    }
+
+    public static String getPrimaryActionName(final String actionName) {
+        return actionName + "[p]";
+    }
+
+    public static String getReplicaActionName(final String actionName) {
+        return actionName + "[r]";
     }
 
 }
