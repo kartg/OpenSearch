@@ -35,6 +35,8 @@ package org.opensearch.cluster;
 import com.carrotsearch.hppc.cursors.ObjectCursor;
 import com.carrotsearch.hppc.cursors.ObjectObjectCursor;
 import org.opensearch.cluster.block.ClusterBlock;
+import org.opensearch.cluster.block.ClusterBlockException;
+import org.opensearch.cluster.block.ClusterBlockLevel;
 import org.opensearch.cluster.block.ClusterBlocks;
 import org.opensearch.cluster.coordination.CoordinationMetadata;
 import org.opensearch.cluster.coordination.CoordinationMetadata.VotingConfigExclusion;
@@ -316,6 +318,26 @@ public class ClusterState implements ToXContentFragment, Diffable<ClusterState> 
 
     public Set<VotingConfigExclusion> getVotingConfigExclusions() {
         return coordinationMetadata().getVotingConfigExclusions();
+    }
+
+    public ClusterBlockException checkForBlockException(
+        final String indexName,
+        final ClusterBlockLevel globalBlockLevel,
+        final ClusterBlockLevel indexBlockLevel
+    ) {
+        if (globalBlockLevel != null) {
+            ClusterBlockException blockException = this.blocks().globalBlockedException(globalBlockLevel);
+            if (blockException != null) {
+                return blockException;
+            }
+        }
+        if (indexBlockLevel != null) {
+            ClusterBlockException blockException = this.blocks().indexBlockedException(indexBlockLevel, indexName);
+            if (blockException != null) {
+                return blockException;
+            }
+        }
+        return null;
     }
 
     /**

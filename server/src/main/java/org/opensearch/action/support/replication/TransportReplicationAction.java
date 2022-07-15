@@ -320,24 +320,6 @@ public abstract class TransportReplicationAction<
         return TransportRequestOptions.EMPTY;
     }
 
-    private ClusterBlockException blockExceptions(final ClusterState state, final String indexName) {
-        ClusterBlockLevel globalBlockLevel = globalBlockLevel();
-        if (globalBlockLevel != null) {
-            ClusterBlockException blockException = state.blocks().globalBlockedException(globalBlockLevel);
-            if (blockException != null) {
-                return blockException;
-            }
-        }
-        ClusterBlockLevel indexBlockLevel = indexBlockLevel();
-        if (indexBlockLevel != null) {
-            ClusterBlockException blockException = state.blocks().indexBlockedException(indexBlockLevel, indexName);
-            if (blockException != null) {
-                return blockException;
-            }
-        }
-        return null;
-    }
-
     protected boolean retryPrimaryException(final Throwable e) {
         return e.getClass() == ReplicationOperation.RetryOnPrimaryException.class
             || TransportActions.isShardNotAvailableException(e)
@@ -455,7 +437,11 @@ public abstract class TransportReplicationAction<
                 final ClusterState clusterState = clusterService.state();
                 final IndexMetadata indexMetadata = clusterState.metadata().getIndexSafe(primaryShardReference.routingEntry().index());
 
-                final ClusterBlockException blockException = blockExceptions(clusterState, indexMetadata.getIndex().getName());
+                final ClusterBlockException blockException = clusterState.checkForBlockException(
+                    indexMetadata.getIndex().getName(),
+                    globalBlockLevel(),
+                    indexBlockLevel()
+                );
                 if (blockException != null) {
                     logger.trace("cluster is blocked, action failed on primary", blockException);
                     throw blockException;
@@ -859,7 +845,11 @@ public abstract class TransportReplicationAction<
         protected void doRun() {
             ReplicationTask.setPhaseSafe(task, "routing");
             final ClusterState state = observer.setAndGetObservedState();
-            final ClusterBlockException blockException = blockExceptions(state, request.shardId().getIndexName());
+            final ClusterBlockException blockException = state.checkForBlockException(
+                request.shardId().getIndexName(),
+                globalBlockLevel(),
+                indexBlockLevel()
+            );
             if (blockException != null) {
                 if (blockException.retryable()) {
                     logger.trace("cluster is blocked, scheduling a retry", blockException);
