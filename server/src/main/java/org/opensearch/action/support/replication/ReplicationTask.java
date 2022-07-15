@@ -57,6 +57,16 @@ public class ReplicationTask extends Task {
     }
 
     /**
+     * Sets the current phase on the task if it isn't null. Pulled into its own
+     * method because its more convenient that way.
+     */
+    public static void setPhaseSafe(ReplicationTask task, String phase) {
+        if (task != null) {
+            task.setPhase(phase);
+        }
+    }
+
+    /**
      * Set the current phase of the task.
      */
     public void setPhase(String phase) {
