@@ -68,7 +68,6 @@ import org.opensearch.common.settings.Setting;
 import org.opensearch.common.settings.Settings;
 import org.opensearch.common.unit.TimeValue;
 import org.opensearch.common.util.concurrent.AbstractRunnable;
-import org.opensearch.index.IndexNotFoundException;
 import org.opensearch.index.IndexService;
 import org.opensearch.index.seqno.SequenceNumbers;
 import org.opensearch.index.shard.IndexShard;
@@ -77,7 +76,6 @@ import org.opensearch.index.shard.ReplicationGroup;
 import org.opensearch.index.shard.ShardId;
 import org.opensearch.index.shard.ShardNotFoundException;
 import org.opensearch.index.shard.ShardNotInPrimaryModeException;
-import org.opensearch.indices.IndexClosedException;
 import org.opensearch.indices.IndicesService;
 import org.opensearch.node.NodeClosedException;
 import org.opensearch.tasks.Task;
@@ -814,6 +812,7 @@ public abstract class TransportReplicationAction<
      * @opensearch.internal
      */
     final class ReroutePhase extends AbstractRunnable {
+        private final RerouteDecider decider;
         private final ActionListener<Response> listener;
         private final Request request;
         private final boolean initiatedByNodeClient;
@@ -826,14 +825,23 @@ public abstract class TransportReplicationAction<
         }
 
         ReroutePhase(ReplicationTask task, Request request, ActionListener<Response> listener, boolean initiatedByNodeClient) {
-            this.request = request;
-            this.initiatedByNodeClient = initiatedByNodeClient;
-            if (task != null) {
-                this.request.setParentTask(clusterService.localNode().getId(), task.getId());
-            }
-            this.listener = listener;
             this.task = task;
-            this.observer = new ClusterStateObserver(clusterService, request.timeout(), logger, threadPool.getThreadContext());
+            this.request = request;
+            if (this.task != null) {
+                this.request.setParentTask(clusterService.localNode().getId(), this.task.getId());
+            }
+            this.observer = new ClusterStateObserver(clusterService, this.request.timeout(), logger, threadPool.getThreadContext());
+            this.decider = new RerouteDecider(
+                task,
+                request,
+                actionName,
+                observer,
+                TransportReplicationAction.this::globalBlockLevel,
+                TransportReplicationAction.this::indexBlockLevel,
+                logger
+            );
+            this.initiatedByNodeClient = initiatedByNodeClient;
+            this.listener = listener;
         }
 
         @Override
@@ -843,95 +851,22 @@ public abstract class TransportReplicationAction<
 
         @Override
         protected void doRun() {
-            ReplicationTask.setPhaseSafe(task, "routing");
-            final ClusterState state = observer.setAndGetObservedState();
-            final ClusterBlockException blockException = state.checkForBlockException(
-                request.shardId().getIndexName(),
-                globalBlockLevel(),
-                indexBlockLevel()
-            );
-            if (blockException != null) {
-                if (blockException.retryable()) {
-                    logger.trace("cluster is blocked, scheduling a retry", blockException);
-                    retry(blockException);
+            RerouteDecider.Result rerouteResult = decider.execute();
+            RerouteDecider.Decision rerouteDecision = rerouteResult.decision();
+            if (rerouteDecision == RerouteDecider.Decision.LOCAL || rerouteDecision == RerouteDecider.Decision.REMOTE) {
+                final ClusterState clusterState = rerouteResult.clusterState();
+                final ShardRouting primary = clusterState.getRoutingTable().shardRoutingTable(request.shardId()).primaryShard();
+                final DiscoveryNode node = clusterState.nodes().get(primary.currentNodeId());
+                if (rerouteDecision == RerouteDecider.Decision.REMOTE) {
+                    performRemoteAction(clusterState, primary, node);
                 } else {
-                    finishAsFailed(blockException);
+                    final IndexMetadata indexMetadata = clusterState.metadata().index(request.shardId().getIndex());
+                    performLocalAction(clusterState, primary, node, indexMetadata);
                 }
-            } else {
-                final IndexMetadata indexMetadata = state.metadata().index(request.shardId().getIndex());
-                if (indexMetadata == null) {
-                    // ensure that the cluster state on the node is at least as high as the node that decided that the index was there
-                    if (state.version() < request.routedBasedOnClusterVersion()) {
-                        logger.trace(
-                            "failed to find index [{}] for request [{}] despite sender thinking it would be here. "
-                                + "Local cluster state version [{}]] is older than on sending node (version [{}]), scheduling a retry...",
-                            request.shardId().getIndex(),
-                            request,
-                            state.version(),
-                            request.routedBasedOnClusterVersion()
-                        );
-                        retry(
-                            new IndexNotFoundException(
-                                "failed to find index as current cluster state with version ["
-                                    + state.version()
-                                    + "] is stale (expected at least ["
-                                    + request.routedBasedOnClusterVersion()
-                                    + "]",
-                                request.shardId().getIndexName()
-                            )
-                        );
-                        return;
-                    } else {
-                        finishAsFailed(new IndexNotFoundException(request.shardId().getIndex()));
-                        return;
-                    }
-                }
-
-                if (indexMetadata.getState() == IndexMetadata.State.CLOSE) {
-                    finishAsFailed(new IndexClosedException(indexMetadata.getIndex()));
-                    return;
-                }
-
-                if (request.waitForActiveShards() == ActiveShardCount.DEFAULT) {
-                    // if the wait for active shard count has not been set in the request,
-                    // resolve it from the index settings
-                    request.waitForActiveShards(indexMetadata.getWaitForActiveShards());
-                }
-                assert request.waitForActiveShards() != ActiveShardCount.DEFAULT
-                    : "request waitForActiveShards must be set in resolveRequest";
-
-                final ShardRouting primary = state.getRoutingTable().shardRoutingTable(request.shardId()).primaryShard();
-                if (primary == null || primary.active() == false) {
-                    logger.trace(
-                        "primary shard [{}] is not yet active, scheduling a retry: action [{}], request [{}], "
-                            + "cluster state version [{}]",
-                        request.shardId(),
-                        actionName,
-                        request,
-                        state.version()
-                    );
-                    retryBecauseUnavailable(request.shardId(), "primary shard is not active");
-                    return;
-                }
-                if (state.nodes().nodeExists(primary.currentNodeId()) == false) {
-                    logger.trace(
-                        "primary shard [{}] is assigned to an unknown node [{}], scheduling a retry: action [{}], request [{}], "
-                            + "cluster state version [{}]",
-                        request.shardId(),
-                        primary.currentNodeId(),
-                        actionName,
-                        request,
-                        state.version()
-                    );
-                    retryBecauseUnavailable(request.shardId(), "primary shard isn't assigned to a known node.");
-                    return;
-                }
-                final DiscoveryNode node = state.nodes().get(primary.currentNodeId());
-                if (primary.currentNodeId().equals(state.nodes().getLocalNodeId())) {
-                    performLocalAction(state, primary, node, indexMetadata);
-                } else {
-                    performRemoteAction(state, primary, node);
-                }
+            } else if (rerouteDecision == RerouteDecider.Decision.RETRY) {
+                retry(rerouteResult.cause());
+            } else if (rerouteDecision == RerouteDecider.Decision.FAILED) {
+                finishAsFailed(rerouteResult.cause());
             }
         }
 
