@@ -30,10 +30,10 @@ jobs:
         with:
           app_id: ${{ secrets.APP_ID }}
           private_key: ${{ secrets.APP_PRIVATE_KEY }}
-          installation_id: 22958780
+          installation_id: ${{ secrets.APP_INSTALLATION_ID }}
 
       - name: Backport
-        uses: VachaShah/backport@v2.1.0
+        uses: kartg/backport@v2.1.0
         with:
           github_token: ${{ steps.github_app_token.outputs.token }}
           head_template: backport/backport-<%= number %>-to-<%= base %>
