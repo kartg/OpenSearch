@@ -20,9 +20,7 @@ jobs:
           && contains(github.event.label.name, 'backport')
         )
       )
-    permissions:
-      contents: write
-      pull-requests: write
+    permissions: write-all
     steps:
       - name: GitHub App token
         id: github_app_token
