@@ -1,0 +1,81 @@
+/*
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The OpenSearch Contributors require contributions made to
+ * this file be licensed under the Apache-2.0 license or a
+ * compatible open source license.
+ *
+ * Modifications Copyright OpenSearch Contributors. See
+ * GitHub history for details.
+ */
+
+import org.opensearch.gradle.Version
+import org.opensearch.gradle.info.BuildParams
+import org.opensearch.gradle.testclusters.StandaloneRestIntegTestTask
+
+apply plugin: 'opensearch.testclusters'
+apply plugin: 'opensearch.standalone-test'
+apply from : "$rootDir/gradle/bwc-test.gradle"
+
+dependencies {
+  testImplementation project(':client:rest-high-level')
+}
+
+String oldVersion = "6.0.0"
+String baseName = "v${oldVersion}"
+String oldClusterName = "${baseName}-old"
+String newClusterName = "${baseName}-new"
+
+def clusterSettings = { v ->
+  return {
+    version = v
+    numberOfNodes = 2
+    setting 'path.repo', "${buildDir}/cluster/shared/repo/${baseName}"
+  }
+}
+
+testClusters {
+  "${oldClusterName}" clusterSettings(oldVersion)
+  "${newClusterName}" clusterSettings(project.version)
+}
+
+tasks.register("${baseName}#Step1OldClusterTest", StandaloneRestIntegTestTask) {
+  useCluster testClusters."${oldClusterName}"
+  mustRunAfter(precommit)
+  doFirst {
+    delete("${buildDir}/cluster/shared/repo/${baseName}")
+  }
+  systemProperty 'tests.rest.suite', 'step1'
+}
+
+tasks.register("${baseName}#Step2NewClusterTest", StandaloneRestIntegTestTask) {
+  useCluster testClusters."${newClusterName}"
+  dependsOn "${baseName}#Step1OldClusterTest"
+  systemProperty 'tests.rest.suite', 'step2'
+}
+
+tasks.register("${baseName}#bwcTest") {
+  dependsOn tasks.named("${baseName}#Step2NewClusterTest")
+}
+
+tasks.matching { it.name.startsWith(baseName) && it.name.endsWith("ClusterTest") }.configureEach {
+  it.systemProperty 'tests.old_cluster_version', oldVersion.toString().minus("-SNAPSHOT")
+  it.systemProperty 'tests.path.repo', "${buildDir}/cluster/shared/repo/${baseName}"
+  def clusterName = it.name.contains("Step2") ? "${newClusterName}" : "${oldClusterName}"
+  it.nonInputProperties.systemProperty('tests.rest.cluster', "${-> testClusters."${clusterName}".allHttpSocketURI.join(",")}")
+  it.nonInputProperties.systemProperty('tests.clustername', "${-> testClusters."${clusterName}".getName()}")
+}
+
+configurations {
+  testArtifacts.extendsFrom testRuntime
+  testArtifacts.extendsFrom testImplementation
+}
+
+def testJar = tasks.register("testJar", Jar) {
+  archiveAppendix = 'test'
+  from sourceSets.test.output
+}
+
+artifacts {
+  testArtifacts testJar
+}
