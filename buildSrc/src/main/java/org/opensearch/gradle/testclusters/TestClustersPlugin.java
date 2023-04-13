@@ -31,6 +31,7 @@
 
 package org.opensearch.gradle.testclusters;
 
+import org.apache.commons.lang3.StringUtils;
 import org.opensearch.gradle.DistributionDownloadPlugin;
 import org.opensearch.gradle.JdkDownloadPlugin;
 import org.opensearch.gradle.ReaperPlugin;
@@ -64,9 +65,27 @@ public class TestClustersPlugin implements Plugin<Project> {
     public static final String EXTENSION_NAME = "testClusters";
     public static final String THROTTLE_SERVICE_NAME = "testClustersThrottle";
 
-    private static final String LIST_TASK_NAME = "listTestClusters";
     private static final String REGISTRY_SERVICE_NAME = "testClustersRegistry";
-    private static final Logger logger = Logging.getLogger(TestClustersPlugin.class);
+
+    /**
+     * Ensures that the correct class is used by subclasses.
+     */
+    private Logger getLogger() {
+        return Logging.getLogger(this.getClass());
+    }
+
+    protected String getExtensionName() {
+        return EXTENSION_NAME;
+    }
+
+    protected void applyDistributionDownloadPlugin(Project project) {
+        project.getRootProject().getPluginManager().apply(GlobalBuildInfoPlugin.class);
+        if (BuildParams.isInternal()) {
+            project.getPlugins().apply(InternalDistributionDownloadPlugin.class);
+        } else {
+            project.getPlugins().apply(DistributionDownloadPlugin.class);
+        }
+    }
 
     @Inject
     protected FileSystemOperations getFileSystemOperations() {
@@ -81,12 +100,7 @@ public class TestClustersPlugin implements Plugin<Project> {
     @Override
     public void apply(Project project) {
         project.getPluginManager().apply(JdkDownloadPlugin.class);
-        project.getRootProject().getPluginManager().apply(GlobalBuildInfoPlugin.class);
-        if (BuildParams.isInternal()) {
-            project.getPlugins().apply(InternalDistributionDownloadPlugin.class);
-        } else {
-            project.getPlugins().apply(DistributionDownloadPlugin.class);
-        }
+        applyDistributionDownloadPlugin(project);
         project.getRootProject().getPluginManager().apply(ReaperPlugin.class);
 
         ReaperService reaper = project.getRootProject().getExtensions().getByType(ReaperService.class);
@@ -121,22 +135,25 @@ public class TestClustersPlugin implements Plugin<Project> {
                 name,
                 project,
                 reaper,
-                new File(project.getBuildDir(), "testclusters"),
+                new File(project.getBuildDir(), getExtensionName()),
                 getFileSystemOperations(),
                 getArchiveOperations()
             )
         );
-        project.getExtensions().add(EXTENSION_NAME, container);
+        project.getExtensions().add(getExtensionName(), container);
         return container;
     }
 
     private void createListClustersTask(Project project, NamedDomainObjectContainer<OpenSearchCluster> container) {
         // Task is never up to date so we can pass an lambda for the task action
-        project.getTasks().register(LIST_TASK_NAME, task -> {
+        final String listTaskName = "list" + StringUtils.capitalize(getExtensionName());
+        project.getTasks().register(listTaskName, task -> {
             task.setGroup("OpenSearch cluster formation");
             task.setDescription("Lists all OpenSearch clusters configured for this project");
             task.doLast(
-                (Task t) -> container.forEach(cluster -> logger.lifecycle("   * {}: {}", cluster.getName(), cluster.getNumberOfNodes()))
+                (Task t) -> container.forEach(
+                    cluster -> getLogger().lifecycle("   * {}: {}", cluster.getName(), cluster.getNumberOfNodes())
+                )
             );
         });
 
